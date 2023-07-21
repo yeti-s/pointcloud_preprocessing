@@ -6,14 +6,22 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <chrono>
 
 #include <liblas/liblas.hpp>
 #include <opencv4/opencv2/core.hpp>
 
 
+
+
+
 #define SCALE 0.01
-#define R 6378137
+#define R 6378137.0
 #define PI 3.14159265358979
+
+
+
+typedef long long Timestamp;
 
 
 
@@ -21,10 +29,32 @@ using namespace std;
 namespace fs = filesystem;
 
 
-vector<time_t> readTimeStamps(fs::path);
-string toString(int, int);
-void printMatrix(cv::Mat);
 
+
+
+class Point {
+public:
+    double x, y, z;
+    unsigned int intensity;
+
+    Point(double x, double y, double z, unsigned int intensity) : x(x), y(y), z(z), intensity(intensity){}
+    cv::Mat to4DMat() {
+        cv::Mat mat = cv::Mat::ones(4, 1, CV_64F);
+        mat.at<double>(0, 0) = this->x;
+        mat.at<double>(1, 0) = this->y;
+        mat.at<double>(2, 0) = this->z;
+
+        return mat;
+    }
+    cv::Mat to3DMat() {
+        cv::Mat mat = cv::Mat::zeros(3, 1, CV_64F);
+        mat.at<double>(0, 0) = this->x;
+        mat.at<double>(1, 0) = this->y;
+        mat.at<double>(2, 0) = this->z;
+
+        return mat;
+    }
+};
 
 typedef struct Coord3D {
     double x, y, z;
@@ -32,21 +62,15 @@ typedef struct Coord3D {
 
 typedef struct Image{
 public:
-    time_t timestamp;
+    Timestamp timestamp;
 } Image;
-
-typedef struct Point {
-public:
-    double x, y, z;
-    unsigned int intensity;
-} Point;
 
 typedef struct VelodynePoints {
     vector<Point> points;
 
-    time_t timestamp;
-    time_t startTime;
-    time_t endTime;
+    Timestamp timestamp;
+    Timestamp startTime;
+    Timestamp endTime;
 } VelodynePoints;
 
 typedef struct Oxts {
@@ -66,8 +90,27 @@ public:
     int velmode;
     int orimode;
 
-    time_t timestamp;
+    Timestamp timestamp;
 } Oxts;
+
+
+
+
+
+
+int writeLas(vector<Point>, string);
+vector<Point> readVelodynePoints(fs::path);
+vector<Timestamp> readTimeStamps(fs::path);
+string toString(int, int);
+void printMatrix(cv::Mat);
+
+
+
+
+
+
+
+
 
 
 class CalibImuToVelo {
@@ -110,9 +153,20 @@ public:
         }
 
         file.close();
+
+        this->setimuToVeloMat();
     }
 
-    cv::Mat imuToVeloMat() {
+    cv::Mat getimuToVeloMat() {
+        return this->imuToVeloMat;
+    }
+
+private:
+    double r[9];
+    double t[3];
+    cv::Mat imuToVeloMat;
+
+    void setimuToVeloMat() {
         cv::Mat matrix = cv::Mat::zeros(4, 4, CV_64F);
 
         for (int i = 0; i < 3; i++)
@@ -123,12 +177,8 @@ public:
             matrix.at<double>(i, 3) = this->t[i];
 
         matrix.at<double>(3, 3) = 1.0;
-        return matrix;
+        this->imuToVeloMat = matrix;
     }
-
-private:
-    double r[9];
-    double t[3];
 };
 
 
@@ -159,7 +209,7 @@ public:
 
     void parseOxts(fs::path directory) {
         // Get time stamps
-        vector<time_t> timestamps = readTimeStamps(directory / "timestamps.txt");
+        vector<Timestamp> timestamps = readTimeStamps(directory / "timestamps.txt");
 
         this->numRecords = timestamps.size();
 
@@ -195,36 +245,19 @@ public:
 
     void parseVelodynePoints(fs::path directory) {
         // Get time stamps
-        vector<time_t> timestamps = readTimeStamps(directory / "timestamps.txt");
-        vector<time_t> startTimes = readTimeStamps(directory / "timestamps_start.txt");
-        vector<time_t> endTimes = readTimeStamps(directory / "timestamps_end.txt");
+        vector<Timestamp> timestamps = readTimeStamps(directory / "timestamps.txt");
+        vector<Timestamp> startTimes = readTimeStamps(directory / "timestamps_start.txt");
+        vector<Timestamp> endTimes = readTimeStamps(directory / "timestamps_end.txt");
 
         // Read OXTS data
         fs::path dataDirectory(directory / "data");
         for (int i = 0; i < timestamps.size(); i++) {
 
             fs::path path(dataDirectory / (toString(i, 10) + ".bin"));
-            ifstream file(path, ios::binary);
-            if (!file.is_open()) {
-                cout << "cannot open " << path << "." << endl;
-                exit(EXIT_FAILURE);
-            }
+            vector<Point> points = readVelodynePoints(path);
 
             VelodynePoints velodynePoints;
-
-            while (!file.eof()) {
-                float x, y, z, intensity;
-
-                file.read(reinterpret_cast<char*>(&x), sizeof(float));
-                file.read(reinterpret_cast<char*>(&y), sizeof(float));
-                file.read(reinterpret_cast<char*>(&z), sizeof(float));
-                file.read(reinterpret_cast<char*>(&intensity), sizeof(float));
-
-                Point point{(double)x, (double)y, (double)z, (unsigned int)(intensity * 255)};
-                velodynePoints.points.push_back(point);
-            }
-
-            file.close();
+            velodynePoints.points = points;
 
             velodynePoints.timestamp = timestamps[i];
             velodynePoints.startTime = startTimes[i];
@@ -236,56 +269,17 @@ public:
 
     int exportLas(string outPath) {
 
-        double minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
-        double maxX = FLT_MIN, maxY = FLT_MIN, maxZ = FLT_MIN;
-        vector<liblas::Point> newPoints;
-        liblas::Header header;
+        vector<Point> newPoints;
 
-        header.SetScale(SCALE, SCALE, SCALE);
+        for (int i = 152; i < 153; i++) {
+            // Oxts oxts = this->oxtsData[i];
+            VelodynePoints velo = this->velodyneData[i];
+            vector<Point> points = this->pointsToWorld(velo, i);
 
-        for (int i = 0; i < this->numRecords; i++) {
-            Oxts oxts = this->oxtsData[i];
-            VelodynePoints velodynPoints = this->velodyneData[i];
-
-            vector<Point> points = this->pointsToWorld(oxts, velodynPoints.points);
-            for (int j = 0; j < points.size(); j++) {
-                Point point = points[j];
-                double x = point.x;
-                double y = point.y;
-                double z = point.z;
-
-                liblas::Point newPoint(&header);
-                newPoint.SetCoordinates(x, y, z);
-                newPoint.SetIntensity(point.intensity);
-                // newPoint.SetTime()
-                newPoints.push_back(newPoint);
-
-                x = newPoint.GetX();
-                y = newPoint.GetY();
-                z = newPoint.GetZ();
-                
-                if (x < minX) minX = x;
-                if (y < minY) minY = y;
-                if (z < minZ) minZ = z;
-
-                if (x > maxX) maxX = x;
-                if (y > maxY) maxY = y;
-                if (z > maxZ) maxZ = z;
-            }
+            newPoints.insert(newPoints.end(), points.begin(), points.end());
         }
 
-        header.SetMax(maxX, maxY, maxZ);
-        header.SetMin(minX, minY, minZ);
-        header.SetRecordsCount(newPoints.size());
-
-        ofstream file(outPath);
-        liblas::Writer writer(file, header);
-
-        for (liblas::Point point : newPoints) {
-            writer.WritePoint(point);
-        }
-
-        return 1;
+        return writeLas(newPoints, outPath);
     }
 
 private:
@@ -338,13 +332,13 @@ private:
         matrix.at<double>(2, 3) = z;
         matrix.at<double>(3, 3) = 1.0;
 
-        printMatrix(matrix);
+        // printMatrix(matrix);
         
         return matrix;
     }
 
     cv::Mat veloToImuMat() {
-        return this->calibImuToVelo.imuToVeloMat().inv();
+        return this->calibImuToVelo.getimuToVeloMat().inv();
     }
 
     cv::Mat pointsToMat(vector<Point> points) {
@@ -362,10 +356,108 @@ private:
         return matrix;
     }
 
+    vector<Point> pointsToWorld(VelodynePoints velo, int frame) {
+
+        Oxts p_oxts, n_oxts, oxts = this->oxtsData[frame];
+        double n_dlat, n_dlon, n_dalt, p_dlat, p_dlon, p_dalt;
+        double n_droll, n_dpitch, n_dyaw, p_droll, p_dpitch, p_dyaw;
+
+        if (frame > 0) {
+            p_oxts = this->oxtsData[frame - 1];
+            Timestamp dTime = oxts.timestamp - p_oxts.timestamp;
+
+            p_dlat = (p_oxts.lat - oxts.lat) / dTime;
+            p_dlon = (p_oxts.lon - oxts.lon) / dTime;
+            p_dalt = (p_oxts.alt - oxts.alt) / dTime;
+            p_droll = (p_oxts.roll - oxts.roll) / dTime;
+            p_dpitch = (p_oxts.pitch - oxts.pitch) / dTime;
+            p_dyaw = (p_oxts.yaw - oxts.yaw) / dTime;
+        }
+        if (frame < this->numRecords - 1) {
+            n_oxts = this->oxtsData[frame + 1];
+            Timestamp dTime = n_oxts.timestamp - oxts.timestamp;
+
+            n_dlat = (n_oxts.lat - oxts.lat) / dTime;
+            n_dlon = (n_oxts.lon - oxts.lon) / dTime;
+            n_dalt = (n_oxts.alt - oxts.alt) / dTime;
+            n_droll = (n_oxts.roll - oxts.roll) / dTime;
+            n_dpitch = (n_oxts.pitch - oxts.pitch) / dTime;
+            n_dyaw = (n_oxts.yaw - oxts.yaw) / dTime;
+        }
+        if (frame == 0) {
+            p_dlat = -n_dlat;
+            p_dlon = -n_dlon;
+            p_dalt = -n_dalt;
+            p_droll = -n_droll;
+            p_dpitch = -n_dpitch;
+            p_dyaw = -n_dyaw;
+        }
+        if (frame == this->numRecords - 1) {
+            n_dlat = -p_dlat;
+            n_dlon = -p_dlon;
+            n_dalt = -p_dalt;
+            n_droll = -p_droll;
+            n_dpitch = -p_dpitch;
+            n_dyaw = -p_dyaw;
+        }
+
+        
+        cv::Mat veloToImu = this->veloToImuMat();
+        vector<Point> points = velo.points;
+        int numPoints = points.size();
+
+        // position of velodyne
+        Point posVelodyne(0, 0, 0, 255);
+        points.push_back(posVelodyne);
+
+
+        Timestamp startTime = velo.startTime;
+        Timestamp dTime = (velo.endTime - startTime) / numPoints;
+        vector<Point> newPoints;
+        
+        for (int i = 0; i < points.size(); i++) {
+            Timestamp time = startTime + dTime * i;
+            Point p = points[i];
+            Oxts newOxts;
+
+            Timestamp timeDiff = time - oxts.timestamp;
+            if (timeDiff > 0) {
+                newOxts.lat = oxts.lat + n_dlat * timeDiff;
+                newOxts.lon = oxts.lon + n_dlon * timeDiff;
+                newOxts.alt = oxts.alt + n_dalt * timeDiff;
+                newOxts.roll = oxts.roll + n_droll * timeDiff;
+                newOxts.pitch = oxts.pitch + n_dpitch * timeDiff;
+                newOxts.yaw = oxts.yaw + n_dyaw * timeDiff;
+            }
+            else {
+                timeDiff = -timeDiff;
+                newOxts.lat = oxts.lat + p_dlat * dTime;
+                newOxts.lon = oxts.lon + p_dlon * dTime;
+                newOxts.alt = oxts.alt + p_dalt * dTime;
+                newOxts.roll = oxts.roll + p_droll * dTime;
+                newOxts.pitch = oxts.pitch + p_dpitch * dTime;
+                newOxts.yaw = oxts.yaw + p_dyaw * dTime;
+            }
+
+            cv::Mat origin = this->ImuToWorldMat(oxts);
+            cv::Mat newMat = this->ImuToWorldMat(newOxts);
+            // printMatrix(newMat - origin);
+            cv::Mat veloToWorld = newMat * veloToImu;
+            cv::Mat pointMat = p.to4DMat();
+            cv::Mat converted = veloToWorld * pointMat;
+
+            Point newPoint(converted.at<double>(0,0), converted.at<double>(1,0), converted.at<double>(2,0), p.intensity);
+            newPoints.push_back(newPoint);
+        }
+
+        return newPoints;
+    }
+
     vector<Point> pointsToWorld(Oxts oxts, vector<Point> points) {
         cv::Mat veloToImu = this->veloToImuMat();
         cv::Mat imuToWorld = this->ImuToWorldMat(oxts);
         cv::Mat veloToWorld = imuToWorld * veloToImu;
+        // cv::Mat veloToWorld = imuToWorld;
         
         int size = points.size();
         cv::Mat pointsMat = cv::Mat::ones(4, size, CV_64F);
@@ -413,9 +505,83 @@ private:
 };
 
 
-vector<time_t> readTimeStamps(fs::path path) {
+int writeLas(vector<Point> points, string outPath) {
+
+    double minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
+    double maxX = FLT_MIN, maxY = FLT_MIN, maxZ = FLT_MIN;
+    vector<liblas::Point> newPoints;
+    liblas::Header header;
+
+    header.SetScale(SCALE, SCALE, SCALE);
+
+    for (int j = 0; j < points.size(); j++) {
+        Point point = points[j];
+        double x = point.x;
+        double y = point.y;
+        double z = point.z;
+
+        liblas::Point newPoint(&header);
+        newPoint.SetCoordinates(x, y, z);
+        newPoint.SetIntensity(point.intensity);
+        // newPoint.SetTime()
+        newPoints.push_back(newPoint);
+
+        x = newPoint.GetX();
+        y = newPoint.GetY();
+        z = newPoint.GetZ();
+        
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (z < minZ) minZ = z;
+
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+        if (z > maxZ) maxZ = z;
+    }
+        
+    header.SetMax(maxX, maxY, maxZ);
+    header.SetMin(minX, minY, minZ);
+    header.SetRecordsCount(newPoints.size());
+
+    ofstream file(outPath);
+    liblas::Writer writer(file, header);
+
+    for (liblas::Point point : newPoints) {
+        writer.WritePoint(point);
+    }
+
+    return 1;
+}
+
+
+vector<Point> readVelodynePoints(fs::path path) {
     ifstream file(path);
-    vector<time_t> timestamps;
+    if (!file.is_open()) {
+        cout << "cannot open " << path << "." << endl;
+        exit(EXIT_FAILURE);
+    }
+
+    vector<Point> points;
+    while (!file.eof()) {
+        float x, y, z, intensity;
+
+        file.read(reinterpret_cast<char*>(&x), sizeof(float));
+        file.read(reinterpret_cast<char*>(&y), sizeof(float));
+        file.read(reinterpret_cast<char*>(&z), sizeof(float));
+        file.read(reinterpret_cast<char*>(&intensity), sizeof(float));
+
+        Point point((double)x, (double)y, (double)z, (unsigned int)(intensity * 255));
+        points.push_back(point);
+    }
+
+    file.close();
+
+    return points;
+}
+
+vector<Timestamp> readTimeStamps(fs::path path) {
+    ifstream file(path);
+    vector<Timestamp> timestamps;
     string line;
 
     while(getline(file, line)) {
@@ -429,13 +595,17 @@ vector<time_t> readTimeStamps(fs::path path) {
             exit(EXIT_FAILURE);
         }
 
-        time_t timestamp = mktime(&datetime);
-        if (timestamp == -1) {
+        time_t time = mktime(&datetime);
+        if (time == -1) {
             cout << "wrong type of datetime" << endl;
             exit(EXIT_FAILURE);
-        }            
+        }
+
+        Timestamp timestamp = stoull(line.substr(line.find('.')+1));
+        timestamp += time * 1.0e+9;
 
         timestamps.push_back(timestamp);
+        // 날자에 대한 기록은 x, 시간에 대한 기록만 남으니 주의해야함
     }
 
     return timestamps;
