@@ -9,7 +9,6 @@ find_package(libLAS REQUIRED)
 find_package(Boost REQUIRED COMPONENTS serialization)
 
 
-# nlohmann/json 라이브러리를 다운로드하고 포함합니다.
 include(FetchContent)
 FetchContent_Declare(
     json
@@ -17,6 +16,8 @@ FetchContent_Declare(
     GIT_TAG v3.10.2
 )
 FetchContent_MakeAvailable(json)
+
+include_directories(json/include)
 
 
 add_executable(lasManipC test.cpp)

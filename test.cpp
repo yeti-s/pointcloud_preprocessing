@@ -1,25 +1,86 @@
 #include <iostream>
 // #include "tracklets.h"
-#include "kitti.h"
+// #include "kitti.h"
+#include "nuscene.h"
+#include "TaskPool.hpp"
+
+
+#define TRHEAD_NUM 4
+
 
 using namespace std;
-int test();
-int test2();
-
+void testNuscene(string path,int num);
+int testBlob();
+int testMini();
 
 int main() {
-    test2();
+    testMini();
 }
 
-int test2() {
-    string filePath = "/mnt/c/Users/yeti/Documents/github/data/kitti_dataset/raw";
-    Records records(filePath, "2011_09_26", "0015");
-    records.exportLas("/mnt/c/Users/yeti/Documents/github/data/kitti_dataset/raw/test.las");
+int testBlob() {
+    testNuscene("/nuscene/v1.0-trainval01_blobs", 8);
 }
+
+int testMini() {
+    testNuscene("/nuscene/v1.0-mini", 0);
+}
+
+
+void testNuscene(string path,int num) {
+    Nuscene nuscene(path);
+    auto samples = nuscene.getInitSampleData();
+
+    filesystem::path baseDir(path);
+
+    struct Task {
+        string token;
+        string outPath;
+        Nuscene *nuscene;
+    };
+    auto processor = [](shared_ptr<Task> task) {
+        task->nuscene->write(task->token, task->outPath);
+    };
+    TaskPool<Task> pool(TRHEAD_NUM, processor);
+
+    int size = samples.size();
+    if (num > 0 && num << size) {
+        size = num;
+    }
+
+    for (int i = 0; i < size; i ++) {
+        cout << samples[i].filename << endl;
+
+        shared_ptr<Task> task = make_shared<Task>();
+        task->nuscene = &nuscene;
+        task->token = samples[i].token;
+        task->outPath = baseDir / "test";
+        pool.addTask(task);
+    }
+
+    pool.waitTillEmpty();
+    pool.close();
+}
+
+
+
+
+// int test2() {
+//     string filePath = "/Documents/github/data/kitti_dataset/raw";
+//     Records records(filePath, "2011_09_26", "0101");
+//     records.exportLas("/Documents/github/data/kitti_dataset/raw/test.las");
+// }
+
+// int test3() {
+//     string filePath = "/Downloads/data_road_velodyne/training/velodyne/um_000002.bin";
+//     string outPath = "/Downloads/data_road_velodyne/training/velodyne/alplha.las";
+
+//     auto points = readVelodynePoints(filePath);
+//     writeLas(points, outPath);
+// }
 
 // int test() {
 //     Tracklets *tracklets = new Tracklets();
-//     string filePath = "/mnt/c/Users/yeti/Downloads/새 폴더/2011_09_26_drive_0015_sync/tracklet_labels.xml";
+//     string filePath = "/Downloads/새 폴더/2011_09_26_drive_0015_sync/tracklet_labels.xml";
 //     try {
 //         tracklets->loadFromFile(filePath);
 //         int numTracklets = tracklets->numberOfTracklets();

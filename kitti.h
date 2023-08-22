@@ -18,6 +18,7 @@
 #define SCALE 0.01
 #define R 6378137.0
 #define PI 3.14159265358979
+#define HEIGHT_FILTER 0.90
 
 
 
@@ -32,29 +33,11 @@ namespace fs = filesystem;
 
 
 
-class Point {
+typedef struct Point {
 public:
     double x, y, z;
     unsigned int intensity;
-
-    Point(double x, double y, double z, unsigned int intensity) : x(x), y(y), z(z), intensity(intensity){}
-    cv::Mat to4DMat() {
-        cv::Mat mat = cv::Mat::ones(4, 1, CV_64F);
-        mat.at<double>(0, 0) = this->x;
-        mat.at<double>(1, 0) = this->y;
-        mat.at<double>(2, 0) = this->z;
-
-        return mat;
-    }
-    cv::Mat to3DMat() {
-        cv::Mat mat = cv::Mat::zeros(3, 1, CV_64F);
-        mat.at<double>(0, 0) = this->x;
-        mat.at<double>(1, 0) = this->y;
-        mat.at<double>(2, 0) = this->z;
-
-        return mat;
-    }
-};
+} Point;
 
 typedef struct Coord3D {
     double x, y, z;
@@ -91,6 +74,7 @@ public:
     int orimode;
 
     Timestamp timestamp;
+    Coord3D position;
 } Oxts;
 
 
@@ -103,6 +87,8 @@ vector<Point> readVelodynePoints(fs::path);
 vector<Timestamp> readTimeStamps(fs::path);
 string toString(int, int);
 void printMatrix(cv::Mat);
+cv::Mat pointsToMat(vector<Point>);
+vector<Point> matToPoints(cv::Mat);
 
 
 
@@ -238,7 +224,16 @@ public:
 
             oxts.timestamp = timestamps[i];
 
+            if (i == 0) this->scale = cos(PI * oxts.lat / 180.0);
+
+            cv::Mat mat = this->imuToWorldMat(oxts);
+            oxts.position.x = mat.at<double>(0, 3);
+            oxts.position.y = mat.at<double>(1, 3);
+            oxts.position.z = mat.at<double>(2, 3);
+
             this->oxtsData.push_back(oxts);
+
+            
         }
 
     }
@@ -271,7 +266,7 @@ public:
 
         vector<Point> newPoints;
 
-        for (int i = 152; i < 153; i++) {
+        for (int i = 449; i < 450; i++) {
             // Oxts oxts = this->oxtsData[i];
             VelodynePoints velo = this->velodyneData[i];
             vector<Point> points = this->pointsToWorld(velo, i);
@@ -283,11 +278,12 @@ public:
     }
 
 private:
+    double scale;
 
-    cv::Mat ImuToWorldMat(Oxts oxts) {
-        double s = cos(PI * this->oxtsData[0].lon / 180.0);
-        double x = R * s * (PI * oxts.lon / 180.0);
-        double y = R * s * log(tan(PI * (90 + oxts.lat) / 360.0));
+    cv::Mat imuToWorldMat(Oxts oxts) {
+        // double s = cos(PI * this->oxtsData[0].lon / 180.0);
+        double x = R * this->scale * PI * oxts.lon / 180.0;
+        double y = R * this->scale * log(tan(PI * (90.0 + oxts.lat) / 360.0));
         double z = oxts.alt;
 
         double sin_roll = sin(oxts.roll);
@@ -343,7 +339,7 @@ private:
 
     cv::Mat pointsToMat(vector<Point> points) {
         int size = points.size();
-        cv::Mat matrix(size, 3, CV_64F);
+        cv::Mat matrix = cv::Mat::ones(size, 4, CV_64F);
 
         for (int i = 0; i < size; i++) {
             Point point = points[i];
@@ -358,104 +354,47 @@ private:
 
     vector<Point> pointsToWorld(VelodynePoints velo, int frame) {
 
-        Oxts p_oxts, n_oxts, oxts = this->oxtsData[frame];
-        double n_dlat, n_dlon, n_dalt, p_dlat, p_dlon, p_dalt;
-        double n_droll, n_dpitch, n_dyaw, p_droll, p_dpitch, p_dyaw;
+        Oxts oxts = this->oxtsData[frame];
 
-        if (frame > 0) {
-            p_oxts = this->oxtsData[frame - 1];
-            Timestamp dTime = oxts.timestamp - p_oxts.timestamp;
-
-            p_dlat = (p_oxts.lat - oxts.lat) / dTime;
-            p_dlon = (p_oxts.lon - oxts.lon) / dTime;
-            p_dalt = (p_oxts.alt - oxts.alt) / dTime;
-            p_droll = (p_oxts.roll - oxts.roll) / dTime;
-            p_dpitch = (p_oxts.pitch - oxts.pitch) / dTime;
-            p_dyaw = (p_oxts.yaw - oxts.yaw) / dTime;
-        }
-        if (frame < this->numRecords - 1) {
-            n_oxts = this->oxtsData[frame + 1];
-            Timestamp dTime = n_oxts.timestamp - oxts.timestamp;
-
-            n_dlat = (n_oxts.lat - oxts.lat) / dTime;
-            n_dlon = (n_oxts.lon - oxts.lon) / dTime;
-            n_dalt = (n_oxts.alt - oxts.alt) / dTime;
-            n_droll = (n_oxts.roll - oxts.roll) / dTime;
-            n_dpitch = (n_oxts.pitch - oxts.pitch) / dTime;
-            n_dyaw = (n_oxts.yaw - oxts.yaw) / dTime;
-        }
-        if (frame == 0) {
-            p_dlat = -n_dlat;
-            p_dlon = -n_dlon;
-            p_dalt = -n_dalt;
-            p_droll = -n_droll;
-            p_dpitch = -n_dpitch;
-            p_dyaw = -n_dyaw;
-        }
-        if (frame == this->numRecords - 1) {
-            n_dlat = -p_dlat;
-            n_dlon = -p_dlon;
-            n_dalt = -p_dalt;
-            n_droll = -p_droll;
-            n_dpitch = -p_dpitch;
-            n_dyaw = -p_dyaw;
-        }
-
-        
+        this->veloToImuMat();
         cv::Mat veloToImu = this->veloToImuMat();
         vector<Point> points = velo.points;
         int numPoints = points.size();
 
-        // position of velodyne
-        Point posVelodyne(0, 0, 0, 255);
-        points.push_back(posVelodyne);
+        // for (int i = 0; i < numPoints; i++) {
+        //     points[i].x += oxts.position.x;
+        //     points[i].y += oxts.position.y;
+        //     points[i].z += oxts.position.z;
+        // }
+        // points.push_back({oxts.position.x, oxts.position.y, oxts.position.z, 255});
 
+        // return points;
 
-        Timestamp startTime = velo.startTime;
-        Timestamp dTime = (velo.endTime - startTime) / numPoints;
+        // velodyne to world coords
+        cv::Mat pointsMat = pointsToMat(points);
+        pointsMat = this->imuToWorldMat(oxts) * this->veloToImuMat() * pointsMat.t();
+        vector<Point> transformed = matToPoints(pointsMat.t());
+
+        double z = oxts.position.z;
         vector<Point> newPoints;
-        
-        for (int i = 0; i < points.size(); i++) {
-            Timestamp time = startTime + dTime * i;
-            Point p = points[i];
-            Oxts newOxts;
-
-            Timestamp timeDiff = time - oxts.timestamp;
-            if (timeDiff > 0) {
-                newOxts.lat = oxts.lat + n_dlat * timeDiff;
-                newOxts.lon = oxts.lon + n_dlon * timeDiff;
-                newOxts.alt = oxts.alt + n_dalt * timeDiff;
-                newOxts.roll = oxts.roll + n_droll * timeDiff;
-                newOxts.pitch = oxts.pitch + n_dpitch * timeDiff;
-                newOxts.yaw = oxts.yaw + n_dyaw * timeDiff;
+        for (int i = 0; i < numPoints; i++) {
+            Point p = transformed[i];
+            
+            if (z - p.z >= HEIGHT_FILTER && points[i].intensity > 80) {
+                p.intensity = points[i].intensity;
+                newPoints.push_back(p);
             }
-            else {
-                timeDiff = -timeDiff;
-                newOxts.lat = oxts.lat + p_dlat * dTime;
-                newOxts.lon = oxts.lon + p_dlon * dTime;
-                newOxts.alt = oxts.alt + p_dalt * dTime;
-                newOxts.roll = oxts.roll + p_droll * dTime;
-                newOxts.pitch = oxts.pitch + p_dpitch * dTime;
-                newOxts.yaw = oxts.yaw + p_dyaw * dTime;
-            }
-
-            cv::Mat origin = this->ImuToWorldMat(oxts);
-            cv::Mat newMat = this->ImuToWorldMat(newOxts);
-            // printMatrix(newMat - origin);
-            cv::Mat veloToWorld = newMat * veloToImu;
-            cv::Mat pointMat = p.to4DMat();
-            cv::Mat converted = veloToWorld * pointMat;
-
-            Point newPoint(converted.at<double>(0,0), converted.at<double>(1,0), converted.at<double>(2,0), p.intensity);
-            newPoints.push_back(newPoint);
         }
+        
+        // add current car position on frame
+        newPoints.push_back({oxts.position.x, oxts.position.y, oxts.position.z, 255});
 
         return newPoints;
     }
 
     vector<Point> pointsToWorld(Oxts oxts, vector<Point> points) {
         cv::Mat veloToImu = this->veloToImuMat();
-        cv::Mat imuToWorld = this->ImuToWorldMat(oxts);
+        cv::Mat imuToWorld = this->imuToWorldMat(oxts);
         cv::Mat veloToWorld = imuToWorld * veloToImu;
         // cv::Mat veloToWorld = imuToWorld;
         
@@ -570,7 +509,7 @@ vector<Point> readVelodynePoints(fs::path path) {
         file.read(reinterpret_cast<char*>(&z), sizeof(float));
         file.read(reinterpret_cast<char*>(&intensity), sizeof(float));
 
-        Point point((double)x, (double)y, (double)z, (unsigned int)(intensity * 255));
+        Point point{(double)x, (double)y, (double)z, (unsigned int)(intensity * 255)};
         points.push_back(point);
     }
 
@@ -634,4 +573,34 @@ void printMatrix(cv::Mat mat) {
         cout << "]" << endl;
     }
     cout << "" << endl;
+}
+
+cv::Mat pointsToMat(vector<Point> points) {
+    int size = points.size();
+    cv::Mat mat = cv::Mat::ones(size, 4, CV_64F);
+
+    for (int i = 0; i < size; i++) {
+        Point point = points[i];
+
+        mat.at<double>(i, 0) = point.x;
+        mat.at<double>(i, 1) = point.y;
+        mat.at<double>(i, 2) = point.z;
+    }
+
+    return mat;
+}
+
+vector<Point> matToPoints(cv::Mat mat) {
+    vector<Point> points;
+
+    for (int i = 0; i < mat.rows; i++) {
+        double x = mat.at<double>(i, 0);
+        double y = mat.at<double>(i, 1);
+        double z = mat.at<double>(i, 2);
+
+        Point point{x, y, z, 0};
+        points.push_back(point);
+    }
+
+    return points;
 }
